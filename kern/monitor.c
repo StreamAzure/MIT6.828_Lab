@@ -24,6 +24,7 @@ struct Command {
 static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
+	{ "meow", "Display meow~", mon_meow},
 };
 
 /***** Implementations of basic kernel monitor commands *****/
@@ -55,9 +56,15 @@ mon_kerninfo(int argc, char **argv, struct Trapframe *tf)
 }
 
 int
+mon_meow(int argc, char **argv, struct Trapframe *tf)
+{
+	cprintf("Meow~\n");
+	return 0;
+}
+
+int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf)
 {
-	// Your code here.
 	return 0;
 }
 
@@ -114,6 +121,8 @@ monitor(struct Trapframe *tf)
 
 	cprintf("Welcome to the JOS kernel monitor!\n");
 	cprintf("Type 'help' for a list of commands.\n");
+
+	cprintf("x=%d y=%d", 3);
 
 
 	while (1) {

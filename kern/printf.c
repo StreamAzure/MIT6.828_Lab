@@ -16,6 +16,7 @@ putch(int ch, int *cnt)
 int
 vcprintf(const char *fmt, va_list ap)
 {
+	
 	int cnt = 0;
 
 	vprintfmt((void*)putch, &cnt, fmt, ap);
