@@ -25,6 +25,7 @@ static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
 	{ "meow", "Display meow~", mon_meow},
+	{ "backtrace", "Display information about the stack frames", mon_backtrace },
 };
 
 /***** Implementations of basic kernel monitor commands *****/
@@ -65,10 +66,24 @@ mon_meow(int argc, char **argv, struct Trapframe *tf)
 int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf)
 {
+	uint32_t *ebp, eip;
+	cprintf("Stack backtrace:\n");
+	ebp = (unsigned int *)read_ebp(); 
+	while( ebp != 0x0 ){
+		eip = *(ebp+1);
+		cprintf("ebp %08x eip %08x args ", ebp, eip);
+		cprintf("%08x %08x %08x %08x %08x\n", *(ebp+2), *(ebp+3), *(ebp+4), *(ebp+5), *(ebp+6));
+		struct Eipdebuginfo info;
+		debuginfo_eip(eip, &info);
+		cprintf("\t%s:%d: ", info.eip_file, info.eip_line);
+		cprintf("%.*s", info.eip_fn_namelen, info.eip_fn_name);
+		// info.eip_fn_name不以'\0'结尾，所以要用%.*s输出
+		cprintf("+%u\n", eip - info.eip_fn_addr);
+		ebp  = (uint32_t*) *ebp;
+		// 切换到上一层栈帧
+	}
 	return 0;
 }
-
-
 
 /***** Kernel monitor command interpreter *****/
 
@@ -121,9 +136,6 @@ monitor(struct Trapframe *tf)
 
 	cprintf("Welcome to the JOS kernel monitor!\n");
 	cprintf("Type 'help' for a list of commands.\n");
-
-	cprintf("x=%d y=%d", 3);
-
 
 	while (1) {
 		buf = readline("K> ");
