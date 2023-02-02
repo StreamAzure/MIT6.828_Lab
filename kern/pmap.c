@@ -49,8 +49,8 @@ i386_detect_memory(void)
 	else
 		totalmem = basemem;
 
-	npages = totalmem / (PGSIZE / 1024);
-	npages_basemem = basemem / (PGSIZE / 1024);
+	npages = totalmem / (PGSIZE / 1024); //PGSIZE 4KB, 统计物理内存页数
+	npages_basemem = basemem / (PGSIZE / 1024); //基本内存页数
 
 	cprintf("Physical memory: %uK available, base = %uK, extended = %uK\n",
 		totalmem, basemem, totalmem - basemem);
@@ -93,8 +93,11 @@ boot_alloc(uint32_t n)
 	// the first virtual address that the linker did *not* assign
 	// to any kernel code or global variables.
 	if (!nextfree) {
-		extern char end[];
-		nextfree = ROUNDUP((char *) end, PGSIZE);
+		extern char end[];  
+		nextfree = ROUNDUP((char *) end, PGSIZE); 
+		//end是bss段的end，同时也是尚未分配给任何代码或全局变量的内存空间的第一个起始地址
+		//又，页的起始地址需要是4096的倍数，故可能还要浪费几个地址空间再向后挪一挪，所以需要ROUNDUP
+		cprintf("physical memory start at: %x\n", nextfree);
 	}
 
 	// Allocate a chunk large enough to hold 'n' bytes, then update
@@ -102,8 +105,20 @@ boot_alloc(uint32_t n)
 	// to a multiple of PGSIZE.
 	//
 	// LAB 2: Your code here.
+	// 需要分配连续n个字节的空间
+	
+	if(n == 0){
+		return nextfree; // 返回一个虚拟地址
+	}
+	else if(n > 0){
+		char* result = nextfree;
+		nextfree = ROUNDUP((char*)(nextfree + n), PGSIZE);
+		if(PADDR(nextfree) >= npages * PGSIZE)
+			panic("boot_alloc: out of memory!\n");
+		else return result; // 返回一个虚拟地址
+	}
+	else panic("boot_alloc: the parameter n is invalid!\n");
 
-	return NULL;
 }
 
 // Set up a two-level page table:
@@ -125,7 +140,7 @@ mem_init(void)
 	i386_detect_memory();
 
 	// Remove this line when you're ready to test this function.
-	panic("mem_init: This function is not finished\n");
+	// panic("mem_init: This function is not finished\n");
 
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
@@ -148,7 +163,13 @@ mem_init(void)
 	// array.  'npages' is the number of physical pages in memory.  Use memset
 	// to initialize all fields of each struct PageInfo to 0.
 	// Your code goes here:
-
+	// 为物理页状态数组分配内存并初始化为0
+	pages = boot_alloc(npages * sizeof(struct PageInfo));
+	memset(pages, 0, npages * sizeof(struct PageInfo));
+	// cprintf("sizeof(struct PageInfo): %d\nsizeof(pages): %d\nnpages * sizeof(struct PageInfo): %d\n", sizeof(struct PageInfo),sizeof(npages), npages * sizeof(struct PageInfo));
+	// sizeof(struct PageInfo): 8
+	// sizeof(pages): 4
+	// npages * sizeof(struct PageInfo): 262144
 
 	//////////////////////////////////////////////////////////////////////
 	// Now that we've allocated the initial kernel data structures, we set
@@ -251,8 +272,41 @@ page_init(void)
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
+	// size_t i;
+	// for (i = 0; i < 10; i++) {
+	// 	pages[i].pp_ref = 0;
+	// 	pages[i].pp_link = page_free_list;
+	// 	cprintf("pages[%d].pp_link = %x\n", i, page_free_list);
+	// 	page_free_list = &pages[i];
+	// }
+
+	//  1) Mark physical page 0 as in use.
+	pages[0].pp_ref = 1;
+
+	//  2) The rest of base memory, [PGSIZE, npages_basemem * PGSIZE) is free.
 	size_t i;
-	for (i = 0; i < npages; i++) {
+	for(i = 1; i < npages_basemem; i++){
+		pages[i].pp_ref = 0;
+		pages[i].pp_link = page_free_list;
+		page_free_list = &pages[i];
+	}
+	// 3) Then comes the IO hole [IOPHYSMEM, EXTPHYSMEM), which must never be allocated.
+	// 在inc/memlayout.h中:IOPHYSMEM 0x0A0000, EXTPHYSMEM 0x100000，即从第160页开始到第256-1页结束（第256页已经属于EXTPHYSMEM）
+	for(i = (IOPHYSMEM >> PGSHIFT); i < (EXTPHYSMEM >> PGSHIFT); i++){ 
+	// PGSHIFT = 12，IOPHYSMEM>>PGSHIFT 等价于 IOPHYSMEM/4096，计算机做除法很慢，所以这里尽量用右移代替
+		pages[i].pp_ref = 0;
+	}
+	// 4) Then extended memory [EXTPHYSMEM, ...).
+	//    Some of it is in use, some is free. Where is the kernel in physical memory?  Which pages are already in use for
+	//    page tables and other data structures?
+	// 物理地址：0x0A0000 ~ 0x0FFFFF 为IO部分，0x100000 ~ 0x117000-0x1(0x116FFF) 为内核代码，0x117000 ~ 0x158000-0x1为boot_alloc分配的部分
+	// cprintf("after boot_alloc, the free virtual address starts at: %x\n", boot_alloc(0));
+	size_t EXT_first_free = PADDR(boot_alloc(0)) >> PGSHIFT;
+	for(i = (EXTPHYSMEM >> PGSHIFT); i < EXT_first_free; i++){
+		pages[i].pp_ref = 1;
+	}
+	// 余下部分均标记为free
+	for(i = EXT_first_free; i < npages; i++){
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
@@ -274,8 +328,20 @@ page_init(void)
 struct PageInfo *
 page_alloc(int alloc_flags)
 {
-	// Fill this function in
-	return 0;
+	// 只需要返回所分配的页的对应PageInfo虚拟地址，而不是实际分配内存的起始地址
+	if(page_free_list == NULL) return NULL;
+	// page_free_list此时已指向空闲页链表的表头结点，是一个虚拟地址
+	struct PageInfo *ret = page_free_list;
+	page_free_list = page_free_list->pp_link;
+	if (alloc_flags & ALLOC_ZERO){
+		memset(page2kva(ret),'\0', PGSIZE); 
+		// page2kva：参数为PageInfo虚拟地址，返回该PageInfo对应的页的虚拟地址
+		// 将该页中数值全部初始化为'\0'
+	}
+	// 记得将分配出去的页从空闲页链表中摘出去
+	ret -> pp_link = NULL;
+	// 不增加 pp_ref，该工作由调用者完成
+	return ret; // 返回虚拟地址
 }
 
 //
@@ -288,6 +354,11 @@ page_free(struct PageInfo *pp)
 	// Fill this function in
 	// Hint: You may want to panic if pp->pp_ref is nonzero or
 	// pp->pp_link is not NULL.
+	if(pp->pp_ref != 0 || pp->pp_link != NULL) 
+		panic("page_free error!");
+	pp->pp_link = page_free_list; 
+	page_free_list = pp;
+	//即从链表头部插入结点
 }
 
 //
