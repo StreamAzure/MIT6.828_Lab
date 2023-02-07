@@ -97,7 +97,7 @@ boot_alloc(uint32_t n)
 		nextfree = ROUNDUP((char *) end, PGSIZE); 
 		//end是bss段的end，同时也是尚未分配给任何代码或全局变量的内存空间的第一个起始地址
 		//又，页的起始地址需要是4096的倍数，故可能还要浪费几个地址空间再向后挪一挪，所以需要ROUNDUP
-		cprintf("physical memory start at: %x\n", nextfree);
+		// cprintf("physical memory start at: %x\n", nextfree);
 	}
 
 	// Allocate a chunk large enough to hold 'n' bytes, then update
@@ -106,7 +106,7 @@ boot_alloc(uint32_t n)
 	//
 	// LAB 2: Your code here.
 	// 需要分配连续n个字节的空间
-	
+
 	if(n == 0){
 		return nextfree; // 返回一个虚拟地址
 	}
@@ -193,6 +193,9 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
+	// show_kern_pgdir();
+	boot_map_region(kern_pgdir, UPAGES, PTSIZE, PADDR(pages), PTE_U);
+	// show_kern_pgdir();
 
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
@@ -205,7 +208,8 @@ mem_init(void)
 	//       overwrite memory.  Known as a "guard page".
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
-
+	boot_map_region(kern_pgdir, KSTACKTOP-KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W);
+	// show_kern_pgdir();
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE.
 	// Ie.  the VA range [KERNBASE, 2^32) should map to
@@ -214,7 +218,8 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
-
+	boot_map_region(kern_pgdir, KERNBASE, 0xffffffff - KERNBASE, 0, PTE_W);
+	// show_kern_pgdir();
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
 
@@ -238,6 +243,19 @@ mem_init(void)
 
 	// Some more checks, only possible after kern_pgdir is installed.
 	check_page_installed_pgdir();
+}
+
+void show_kern_pgdir(){
+	int i;
+	for(i = 0; i < 1024; i++){
+		if(!kern_pgdir[i]) continue;
+		pte_t* first_pte = KADDR(PTE_ADDR(kern_pgdir[i]));
+		physaddr_t pa = PTE_ADDR(*first_pte);
+		// 使用页目录索引、页表索引、物理地址低12bit，得到虚拟地址
+		pte_t* va = PGADDR(i, 0, (pa & 0xfff));
+		cprintf("kern_pgdir[%d]: 0x%x\n", i, va);
+	}
+	cprintf("\n");
 }
 
 // --------------------------------------------------------------
@@ -397,7 +415,27 @@ page_decref(struct PageInfo* pp)
 pte_t *
 pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
-	// Fill this function in
+	// 根据虚拟地址va找到对应页表项，返回页表项地址
+	// pde_t *pde = pgdir + PDX(va); // PDX(va)取va的前10bit，找到对应PDE
+	pde_t* pde = &pgdir[PDX(va)];
+	pte_t* pte;
+	if(*pde & PTE_P){ // 若该PDE的PTE_P标志位为1，对应页表存在
+		pte = KADDR(PTE_ADDR(*pde));
+		pte = &pte[PTX(va)];
+		return pte; //页表项虚拟地址
+	}
+	else if (create){
+		// 如果连对应的页表都没有，新建页目录项并分配物理页以保存页表
+		struct PageInfo *pg = page_alloc(ALLOC_ZERO);
+		if(pg){
+			pg -> pp_ref ++;
+			*pde = (page2pa(pg)) | PTE_P | PTE_U | PTE_W;
+			// 在页目录项中填入内容：页表物理地址 + PTE_P标记页表存在
+			pte = KADDR(PTE_ADDR(*pde));
+			pte = &pte[PTX(va)];
+			return pte; // 新的页表项虚拟地址
+		}
+	}
 	return NULL;
 }
 
@@ -415,7 +453,16 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
 static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
-	// Fill this function in
+	// 将虚拟地址 va~va+size 映射到物理地址 pa~pa+size
+	// 遍历所有虚拟地址，调用pgdir_walk逐个生成对应页表项
+	pte_t *pte;
+	int i;
+	for(i = 0; i < size; i+=PGSIZE){ // size是要映射的总字节数，涉及size/PGSIZE个页表项
+		pte = pgdir_walk(pgdir, (void*)va, 1);
+		*pte = pa | perm | PTE_P; // 填入对应物理地址及标志位
+		va += PGSIZE;
+		pa += PGSIZE;
+	}
 }
 
 //
@@ -446,7 +493,19 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
 int
 page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
-	// Fill this function in
+	// 建立物理页pp到虚拟地址va的映射
+	// 如果已经有其他物理页映射到va，执行page_remove删除它
+	// 如果已有pp到va的映射，同上，统一做法
+	pte_t * pte = pgdir_walk(pgdir, va, 1);
+	if(pte == NULL){
+		return -E_NO_MEM; // 对应页表不存在且无法分配内存新建页表
+	}
+	pp -> pp_ref ++; //必须在page_remove前执行
+	if((*pte) & PTE_P){
+		page_remove(pgdir, va); 
+		// 已有映射，删掉，TLB invalidate已包含在page_remove中
+	}
+	*pte = page2pa(pp) | perm | PTE_P; // 填写页表项
 	return 0;
 }
 
@@ -464,8 +523,17 @@ page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
-	// Fill this function in
-	return NULL;
+	// 返回虚拟地址va对应的物理页；如果pte_store不为0，还要把页表项地址赋值给它
+	// 若无对应的页，返回NULL
+	struct PageInfo* ret = NULL; 
+	pte_t* pte = pgdir_walk(pgdir, va, 0);
+	if(pte && (*pte & PTE_P)){
+		if(pte_store){
+			*pte_store = pte;
+		}
+		ret =  pa2page(PTE_ADDR(*pte)); 
+	}
+	return ret;
 }
 
 //
@@ -486,7 +554,15 @@ page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 void
 page_remove(pde_t *pgdir, void *va)
 {
-	// Fill this function in
+	pte_t* pte = NULL;
+	struct PageInfo* pgInfo = page_lookup(pgdir, va, &pte); 
+	// 要求返回对应页表项地址
+	if(pgInfo != NULL && (*pte & PTE_P)){ 
+		//物理页面有可能不存在，如连续对同一个va调用两次page_remove
+		page_decref(pgInfo);
+		*pte = 0;
+		tlb_invalidate(pgdir, va);
+	}
 }
 
 //
@@ -710,8 +786,9 @@ check_va2pa(pde_t *pgdir, uintptr_t va)
 	if (!(*pgdir & PTE_P))
 		return ~0;
 	p = (pte_t*) KADDR(PTE_ADDR(*pgdir));
-	if (!(p[PTX(va)] & PTE_P))
+	if (!(p[PTX(va)] & PTE_P)){
 		return ~0;
+	}
 	return PTE_ADDR(p[PTX(va)]);
 }
 
@@ -752,6 +829,7 @@ check_page(void)
 
 	// free pp0 and try again: pp0 should be used for page table
 	page_free(pp0);
+	// cprintf("DEBUG:\tmapping physical page pp1(%x) to virtual address 0x0...\n", page2pa(pp1));
 	assert(page_insert(kern_pgdir, pp1, 0x0, PTE_W) == 0);
 	assert(PTE_ADDR(kern_pgdir[0]) == page2pa(pp0));
 	assert(check_va2pa(kern_pgdir, 0x0) == page2pa(pp1));
@@ -759,6 +837,7 @@ check_page(void)
 	assert(pp0->pp_ref == 1);
 
 	// should be able to map pp2 at PGSIZE because pp0 is already allocated for page table
+	// cprintf("DEBUG:\tmapping physical page pp2(%x) to virtual address 0x%x...\n", page2pa(pp2),PGSIZE);
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W) == 0);
 	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
