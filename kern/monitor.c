@@ -6,6 +6,7 @@
 #include <inc/memlayout.h>
 #include <inc/assert.h>
 #include <inc/x86.h>
+#include "pmap.h"
 
 #include <kern/console.h>
 #include <kern/monitor.h>
@@ -25,6 +26,9 @@ static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
 	{ "meow", "Display meow~", mon_meow},
+	{ "backtrace", "Display information about the stack frames", mon_backtrace },
+	{ "showmappings", "", mon_showmappings},
+	{ "chmapper", "", mon_change_mappings_permission},
 };
 
 /***** Implementations of basic kernel monitor commands *****/
@@ -65,9 +69,86 @@ mon_meow(int argc, char **argv, struct Trapframe *tf)
 int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf)
 {
+	uint32_t *ebp, eip;
+	cprintf("Stack backtrace:\n");
+	ebp = (unsigned int *)read_ebp(); 
+	while( ebp != 0x0 ){
+		eip = *(ebp+1);
+		cprintf("ebp %08x eip %08x args ", ebp, eip);
+		cprintf("%08x %08x %08x %08x %08x\n", *(ebp+2), *(ebp+3), *(ebp+4), *(ebp+5), *(ebp+6));
+		struct Eipdebuginfo info;
+		debuginfo_eip(eip, &info);
+		cprintf("\t%s:%d: ", info.eip_file, info.eip_line);
+		cprintf("%.*s", info.eip_fn_namelen, info.eip_fn_name);
+		// info.eip_fn_name不以'\0'结尾，所以要用%.*s输出
+		cprintf("+%u\n", eip - info.eip_fn_addr);
+		ebp  = (uint32_t*) *ebp;
+		// 切换到上一层栈帧
+	}
 	return 0;
 }
 
+int 
+mon_showmappings(int argc, char **argv, struct Trapframe *tf)
+{
+	if(argc == 1 || argc > 3) {
+		cprintf("Usage: showmappings <begin_addr> <end_addr>\n");
+		return 0;
+	}
+	uint32_t begin_addr = xtoi(argv[1]);
+	uint32_t end_addr = xtoi(argv[2]);
+	// cprintf("begin: %x, end: %x\n", begin_addr, end_addr);
+	int i;
+	for(i = begin_addr; i <= end_addr; i+=PGSIZE){
+		pte_t* pte = pgdir_walk(kern_pgdir, (void *)i, 0);
+		if(!pte || !(*pte & PTE_P)) {
+			cprintf("missing physical page\n");
+			continue;
+		}
+		else {
+			cprintf("page %x ", KADDR(PTE_ADDR(*pte)));
+			cprintf("PTE_P: %d, PTE_W: %d, PTE_U: %d", *pte & PTE_P, (*pte & PTE_W) >> 1, (*pte & PTE_U) >> 2);
+			cprintf("\n");
+		}
+	}
+	return 0;
+}
+
+int 
+mon_change_mappings_permission(int argc, char** argv, struct Trapframe *tf)
+{
+	if(argc == 1 || argc > 4) {
+		cprintf("Usage: chmapper <addr> <set|clear> <PTE_W|PTE_U>\n");
+		return 0;
+	}
+	uint32_t addr = xtoi(argv[1]);
+	pte_t* pte = pgdir_walk(kern_pgdir, (void *)addr, 0);
+	if(!pte || !(*pte & PTE_P)){
+		cprintf("missing phiscal page\n");
+		return 0;
+	}
+	if(strcmp(argv[3], "PTE_W") == 0){
+		if(strcmp(argv[2], "set") == 0){
+			*pte |= PTE_W;
+		}
+		else if(strcmp(argv[2], "clear") == 0){
+			*pte = *pte & (~PTE_W);
+		}
+	}
+	else if(strcmp(argv[3], "PTE_U") == 0){
+		if(strcmp(argv[2], "set") == 0){
+			*pte |= PTE_U;
+		}
+		else if(strcmp(argv[2], "clear") == 0){
+			*pte = *pte & (~PTE_U);
+		}
+	}
+	else{
+		cprintf("Usage: chmapper <addr> <set|clear> <PTE_W|PTE_U>\n");
+		return 0;
+	}
+	return 0;
+}
 
 
 /***** Kernel monitor command interpreter *****/
@@ -121,9 +202,6 @@ monitor(struct Trapframe *tf)
 
 	cprintf("Welcome to the JOS kernel monitor!\n");
 	cprintf("Type 'help' for a list of commands.\n");
-
-	cprintf("x=%d y=%d", 3);
-
 
 	while (1) {
 		buf = readline("K> ");
