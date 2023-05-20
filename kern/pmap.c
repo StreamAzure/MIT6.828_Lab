@@ -175,6 +175,7 @@ mem_init(void)
 	//////////////////////////////////////////////////////////////////////
 	// Make 'envs' point to an array of size 'NENV' of 'struct Env'.
 	// LAB 3: Your code here.
+	envs = boot_alloc(NENV * sizeof(struct Env));
 
 	//////////////////////////////////////////////////////////////////////
 	// Now that we've allocated the initial kernel data structures, we set
@@ -201,7 +202,7 @@ mem_init(void)
 	// show_kern_pgdir();
 	boot_map_region(kern_pgdir, UPAGES, PTSIZE, PADDR(pages), PTE_U);
 	// show_kern_pgdir();
-
+	
 	//////////////////////////////////////////////////////////////////////
 	// Map the 'envs' array read-only by the user at linear address UENVS
 	// (ie. perm = PTE_U | PTE_P).
@@ -209,6 +210,7 @@ mem_init(void)
 	//    - the new image at UENVS  -- kernel R, user R
 	//    - envs itself -- kernel RW, user NONE
 	// LAB 3: Your code here.
+	boot_map_region(kern_pgdir, UENVS, PTSIZE, PADDR(envs), PTE_U);
 
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
@@ -331,7 +333,8 @@ page_init(void)
 	//    Some of it is in use, some is free. Where is the kernel in physical memory?  Which pages are already in use for
 	//    page tables and other data structures?
 	// 物理地址：0x0A0000 ~ 0x0FFFFF 为IO部分，0x100000 ~ 0x117000-0x1(0x116FFF) 为内核代码，0x117000 ~ 0x158000-0x1为boot_alloc分配的部分
-	// cprintf("after boot_alloc, the free virtual address starts at: %x\n", boot_alloc(0));
+	// Lab3 新增： 0x158000 开始到 0x158060-0x1 为环境数组 envs 分配
+	// cprintf("after boot_alloc, the free virtual address starts at: %x, physical address starts at: %x\n", boot_alloc(0), PADDR(boot_alloc(0)));
 	size_t EXT_first_free = PADDR(boot_alloc(0)) >> PGSHIFT;
 	for(i = (EXTPHYSMEM >> PGSHIFT); i < EXT_first_free; i++){
 		pages[i].pp_ref = 1;
